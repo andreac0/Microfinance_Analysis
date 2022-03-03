@@ -1,0 +1,643 @@
+---
+title: "Progetto Gruppo 7"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r message=FALSE, warning=FALSE}
+library(readxl);library(randomForest);library(tree);library(plm)
+data_original <- as.data.frame(read_excel("dataset_ricodificato.xlsx",
+                                        sheet = "data per export"))
+data_macro <- as.data.frame(read_excel("dataset_ricodificato.xlsx",  sheet = "macro variable"))
+data<-as.data.frame(data_original)
+```
+
+
+Trasformo classe dummies in factors invece che numeric (per successiva comodità)
+```{r}
+dummies<-which(colSums(apply(data,2, function(x) x==0|x==1|is.na(x)))==NROW(data))
+for (i in dummies) {
+  data[,i]<-factor(data[,i])}
+```
+
+Classe delle numeric in factor
+```{r}
+data$StartingYear<-factor(data$StartingYear)
+data$TypeofInstitution<-factor(data$TypeofInstitution)
+data$Size_mfi<-factor(data$Size_mfi)
+data$CostofNotFinProd <-factor(data$CostofNotFinProd)
+data[which(data$Microlending_turnover==0), "Microlending_turnover"]<-rep(NA, length(which(data$Microlending_turnover==0)))
+data$Microlending_turnover<-factor(data$Microlending_turnover)
+data$PrimaryMission<-factor(data$PrimaryMission)
+data$TargetGroup<-factor(data$TargetGroup)
+data$Country<-factor(data$Country)
+data$Num_notfin_services<-factor(data$Num_notfin_services)
+```
+
+Per le variabili relative ai microcrediti sostituisco lo 0 con NA nel caso in cui l'istituzione
+dichiara di effettuare quel servizio di microcredito (imprese o personal) ma ha 
+valore nullo in quelle variabili
+```{r}
+microloan_releted_var<-c("Gross_microloan17","Gross_microloan16","Microlending_turnover","TotalMicroloans2017","TotalMicroloans2016","Number_Microloans2017","Number_Microloans2016","Activeborrowers2017","Activeborrowers2016")
+microloan_business<-c("Average_businessterm","Average_interestrate_business" )
+microloan_personal<-c("Average_personalterm","Average_interestrate_person")
+for (i in 1:NROW(data)) {
+  for (j in 1:length(microloan_personal)) {
+    if((data[i,"Microloans"]=="1" & data[i,microloan_personal[j]]==0)|is.na(data[i,microloan_personal[j]]))
+    {data[i,microloan_personal[j]]<-NA}}
+
+  for (j in 1:length(microloan_business)) {
+    if((data[i,"BusinessMicroloans"]=="1" & data[i,microloan_business[j]]==0)|is.na(data[i,microloan_business[j]]))
+    {data[i,microloan_business[j]]<-NA}}
+  
+  for (j in 1:length(microloan_releted_var)) {
+    if((data[i,"BusinessMicroloans"]=="1"|data[i,"Microloans"]=="1"|data[i,"Businessloans"]=="1")&(data[i,microloan_releted_var[j]]==0|is.na(data[i,microloan_releted_var[j]])))
+    {data[i,microloan_releted_var[j]]<-NA}}}
+rm(i,j,microloan_releted_var,microloan_business,microloan_personal)
+```
+
+Gli zeri nelle variabili relative agli indici di bilancio vengono trasformati in NA
+come suggerito dal report presentato da coloro che hanno raccolto i dati:
+```{r}
+name_indici<-colnames(data)[c(42:72,77:80,82:95)]
+indici_bilancio<-data[,name_indici] #copia degli indici originari
+for (i in c(42:72,77:80,82:95)) {
+  rig<-which(data[,i]==0)
+  data[rig,i]<-rep(NA, length(rig))}
+```
+
+Outliers: funzione che restituisce una matrice di grandezza pari al dataset e 
+che restituisce veri e falsi nelle corrispondenti celle in cui sono presenti outliers:
+questi vengono individuati tendendo conto di una colonna condizionante poiché 
+altrimenti (ad esempio) tutte i valori delle MFI più grandi verrebbero contate come outliers
+```{r}
+outliers<-function(data,k,conditional_column){
+  find.binary <- apply(data,2,function(x) {all(x %in% 0:1)})
+  idsF <- which((find.binary)==FALSE & sapply(data, function(x) class(x)=="numeric"))
+  Q1 = numeric();Q3 = numeric(); iqr = numeric()
+  matrice.verofalso = matrix(FALSE,nrow = nrow(data), ncol = ncol(data))
+  liv<-levels(data[,conditional_column])
+  for (t in 1:length(liv)) {
+    n<-which(data[,conditional_column]==liv[t])
+    for(j in 1:ncol(data)) {
+      if(any(idsF==j)){
+        Q1[j] =  quantile(data[n,j], probs = 0.25,na.rm = TRUE);Q3[j] = quantile(data[n,j], probs = 0.75,na.rm = TRUE);iqr[j] = Q3[j]-Q1[j]}
+      else{Q1[j] =  0;Q3[j] = 0;iqr[j] = 0}}
+    for (i in 1:ncol(data)) {
+      if(find.binary[i]==FALSE & class(data[,i])=="numeric"){
+        j<-which(data[n,i]<Q1[i]-k*iqr[i]|data[n,i]>Q3[i]+k*iqr[i])
+        matrice.verofalso[n[j],i]<-rep(TRUE,length(j))}}}
+  return(matrice.verofalso)}
+```
+
+Identifico gli outlier e sono stati sostituiti questi valori mancanti con degli NA.
+Inoltre è stata fatta la seguente considerazione: se una variabile contiene molti outliers
+è perché vi sono molti valori nulli che creano forti distorsioni nella distribuzione, 
+come ad esempio per i sussidi (il report non dice nulla a riguardo per cui non è dato sapere se 
+i valori nulli indicano valori mancanti o meno, a differenza degli altri indici di bilancio).
+Per cui nel momento in cui vengono identificati molti outlier non si andrà a sostituire questi valori.
+```{r}
+out<-outliers(data,6,1) #k=6 => gli outlier sono valori molto estremi
+out<-data.frame(out)
+colnames(out)<-colnames(data_original)
+for (i in 1:NROW(data)) {
+  data[i,which(out[i,]==TRUE & colSums(out)<=10)]<-rep(NA,length(which(out[i,]==TRUE& colSums(out)<=10)))}
+```
+
+
+Rimozione NAs inserendo la mediana condizionata alla grandezza dell'MFI: questa tecnica verrà 
+utilizzata per le variabili con pochi NA (soglia = 20). Questa soglia non è stata decisa a caso: si è 
+tenuto conto che nel passaggio successivo si dovrà costruire un modello di previsione 
+per le variabili con molti NA, per il quale serviranno delle variabili di riferimento.
+Questa soglia permette di avere un discreto numero di variabili significative (ad esempio quantitative
+continue) per effettuare delle previsioni migliori. 
+```{r}
+rnas <- function(dataset,conditional_column) {
+  dataset[,conditional_column]<-as.factor(dataset[,conditional_column])
+  liv<-levels(dataset[,conditional_column])
+  
+  #colonne quantitative
+  col_na<-which(colSums(is.na(dataset))!=0 & (sapply(dataset, class)=="numeric")==TRUE)
+  media_cond<-numeric()
+  for (j in col_na) {
+    for (i in 1:length(liv)) {
+      media_cond[i]<-median(dataset[which(dataset[,conditional_column]==liv[i]),j],na.rm=TRUE)
+      dataset[which(is.na(dataset[,j])==TRUE & dataset[,conditional_column]==liv[i]),j]<-media_cond[i]}}
+  
+  #colonne character
+  col_na<-which(colSums(is.na(dataset))!=0 & (sapply(dataset, class)=="character"|sapply(dataset, class)=="factor")==TRUE)
+  for (t in col_na) {
+    na<-which(is.na(dataset[,t]))  
+    ma<-as.matrix(table(dataset[,c(conditional_column,t)]))
+    for (i in na) {
+      for(j in 1:length(liv)){
+        if(dataset[i,conditional_column]==liv[j]){
+          dataset[i,t]<-names(which.max(ma[liv[j],]))}}}}
+  if(any(apply(dataset,2, is.nan))) {warning("Change conditional column:NaN detected")}
+  if(any(apply(dataset,2, is.na))) {warning("Change conditional column: NA left")}
+  dataset}
+
+pochina<-as.numeric(which(colSums(is.na(data))<=20))
+moltina<-as.numeric(which(colSums(is.na(data))>20))
+data[,pochina]<-rnas(data[,pochina],which(names(data)=="Size_mfi"))
+any(is.na(data[,pochina]))
+```
+
+Per le altre variabili mancano molti NA adotto un modello previsivo (random forest) stimato
+sulle osservazioni disponibili e utilizzando le variabili senza NA
+```{r}
+variabili_da_prevedere<-which(apply(data,2,function(x)(sum(is.na(x))>0)))
+variabili_modello<-c(1:ncol(data))
+variabili_modello<-variabili_modello[-c(variabili_da_prevedere,which(colnames(data)=="StartingYear"),which(sapply(data, class)=="character"), dummies, which(colnames(data)=="Grants"))]
+
+for (i in variabili_da_prevedere) {
+  n<-formula(paste(colnames(data)[i],"~",paste(colnames(data)[variabili_modello], collapse ="+")))
+  if(class(data[,i])!="numeric"){
+    model<-randomForest(n,data = data[which(is.na(data[,i])==FALSE),])
+    f<-predict(model, newdata = data[which(is.na(data[,i])==TRUE),], type="class")}
+  else{model<-randomForest(n,data = data[which(is.na(data[,i])==FALSE),])
+  f<-predict(model, newdata = data[which(is.na(data[,i])==TRUE),])}
+  
+  col<-which(is.na(data[,i]))
+  data[col,i]<-f}
+```
+
+
+DOMANDA 1 Does the supply of and the ways in which "non-financial services" are 
+provided change from one type of microfinance institution to another (NGOs, banks, other)? 
+
+Confronto Generale sulla quantità di servizi offerti
+```{r echo=FALSE}
+notfin<-colnames(data)[c(15:21,24:32)] #variabili che riguardano i non financial services
+liv<-levels(data$TypeofInstitution)
+rowBanks<-which(data$TypeofInstitution==liv[1])
+rowCredit<-which(data$TypeofInstitution==liv[2])
+rowGov<-which(data$TypeofInstitution==liv[3])
+rowNGO<-which(data$TypeofInstitution==liv[4])
+rowNonBank<-which(data$TypeofInstitution==liv[5])
+rowState<-which(data$TypeofInstitution==liv[6])
+frequenze_servizi_nonfin<-rbind(table(data[rowBanks,"Num_notfin_services"]),
+table(data[rowNGO,"Num_notfin_services"]),
+table(data[rowNonBank,"Num_notfin_services"]),
+table(data[rowCredit,"Num_notfin_services"]),
+table(data[rowGov,"Num_notfin_services"]),
+table(data[rowState,"Num_notfin_services"]))
+
+rownames(frequenze_servizi_nonfin)<-c("Banks","NGOs","Non-bank Financial Institution","Credit", "Gov.", "State Bank")
+frequenze_servizi_nonfin
+kruskal.test(list(table(data[rowBanks,"Num_notfin_services"]),
+                  table(data[rowNGO,"Num_notfin_services"]),
+                  table(data[rowNonBank,"Num_notfin_services"]),
+                  table(data[rowCredit,"Num_notfin_services"])),
+                  table(data[rowGov,"Num_notfin_services"]),
+                  table(data[rowState,"Num_notfin_services"]))
+```
+Il kruskal test fornisce un p-value basso: ciò significa che
+la mediana tra i gruppi non è uguale e quindi si può concludere che
+la tipologia di istituzione condiziona in generale la quantità di servizi offerti.
+
+
+Il confronto tra tabelle di frequenze e test esatto di fisher (preferito al chi quadro
+per la bassa disponibilià di osservazioni):
+```{r echo=FALSE, warning=FALSE}
+freq_test<-function(data,column,alfa=0.01){
+liv<-levels(data$TypeofInstitution)
+freq<-array(dim = c(1,2,4),dimnames = list("Frequenze",c(0,1),c("Banks","Credit","NGOs","Non-bank")))
+freq[,,1]<-table(data[which(data$TypeofInstitution==liv[1]),notfin[column]])
+freq[,,2]<-table(data[which(data$TypeofInstitution==liv[2]),notfin[column]])
+freq[,,3]<-table(data[which(data$TypeofInstitution==liv[4]),notfin[column]])
+freq[,,4]<-table(data[which(data$TypeofInstitution==liv[5]),notfin[column]])
+
+matrice_pchitest<-matrix(1,4,4,dimnames =list(c("Banks","Credit","NGOs","Non-bank"),c("Banks","Credit","NGOs","Non-bank")))
+
+chitest<-function(a,b){
+  h<-rbind(round(prop.table(freq[,,a])*100,2),round(prop.table(freq[,,b])*100,2))
+  fisher.test(h)}
+
+for (i in 1:4) {for (j in 1:4) {if(i!=j) {matrice_pchitest[i,j]<-chitest(i,j)$p.value} else {matrice_pchitest[i,j]<-1}}}
+
+significant<-matrix(c("d","k"),1,2)
+for (i in 1:4) {for (j in 1:4){
+  if(matrice_pchitest[i,j]<alfa& i<j & (is.nan(matrice_pchitest[i,j])==FALSE)){
+    significant<-rbind(significant,c(rownames(matrice_pchitest)[i], colnames(matrice_pchitest)[j]))}}}
+significant<-significant[-1,]
+return(list(Tabella_Frequenze=freq,Variabili_diverse=significant,pvalue=matrice_pchitest))}
+
+categorial<-c(1:3,8:16)
+risultati<-c()
+for (i in categorial) {
+  name<-notfin[i]
+  risultati[[i]]<-(freq_test(data,i,0.05))
+  names(risultati)[[i]]<-name}
+risultati
+```
+
+
+
+DOMANDA 2.	Quantify the impact of non-financial services on the costs of MFIs:
+does the impact change according to the type of institution? 
+```{r}
+#colSums(is.na(data_original))+sapply(data_original, function(x) length(which(x==0)))
+#Aggiungo variabili macroeconomiche growth gdp 
+
+GDP_16<-rep(0,nrow(data))
+for (i in 1:nrow(data_macro)) {
+  GDP_16[which(data$Country==data_macro[i,1])]<-rep(data_macro[i,2],length(which(data$Country==data_macro[i,1])))}
+
+GDP_17<-rep(0,nrow(data))
+for (i in 1:nrow(data_macro)) {
+  GDP_17[which(data$Country==data_macro[i,1])]<-rep(data_macro[i,3],length(which(data$Country==data_macro[i,1])))}
+
+data<-cbind(data,GDP_17=log(GDP_17),GDP_16=log(GDP_16))
+
+
+#DATI PANEL
+dataset<-data[,c("Size_mfi", "Institution_name","TypeofInstitution","FinancialExpenses2017","Operatingexpense2017","Operatingexpense2016",
+                 "FinancialExpenses2016","Activeborrowers2017","Activeborrowers2016" ,"Staff17","Staff16","Staffproductivity2017" ,"Staffproductivity2016",
+                 "Client_development","Business_developments","Entrepreneurship_development","total_liabilites17","total_liabilites16",
+                 "AVG_loan_portfolio17","AVG_loan_portfolio16","total_equity17","total_equity16","total_assets17","total_assets16",
+                 "write_off_ratio17","write_off_ratio16","GDP_17","GDP_16","Noservices_offered","TotalMicroloans2017", "TotalMicroloans2016", "Number_Microloans2017", "Number_Microloans2016","Loanloss2017","Loanloss2016","write_off_ratio16","write_off_ratio17", "PAR30_17","PAR30_16")]
+
+
+data_reshaped<-reshape(dataset,dir="long",timevar="Year",times=c(2017,2016),
+                       varying = list(c("Size_mfi" ,"Size_mfi"),
+                                      c("TypeofInstitution","TypeofInstitution"),
+                                      c("Noservices_offered","Noservices_offered"),
+                                      c("FinancialExpenses2017","FinancialExpenses2016"),
+                                      c("Operatingexpense2017","Operatingexpense2016"),
+                                      c("Activeborrowers2017","Activeborrowers2016"),
+                                      c("Staff17","Staff16"),
+                                      c("Staffproductivity2017" ,"Staffproductivity2016"),
+                                      c("Client_development","Client_development"),
+                                      c("Entrepreneurship_development","Entrepreneurship_development"),
+                                      c("Business_developments","Business_developments"),
+                                      c("AVG_loan_portfolio17","AVG_loan_portfolio16"),
+                                      c("total_assets17","total_assets16"),
+                                      c("total_equity17","total_equity16"),
+                                      c("write_off_ratio17","write_off_ratio16"),
+                                      c("total_liabilites17","total_liabilites16"),
+                                      c("GDP_17","GDP_16"),
+                                      c("TotalMicroloans2017","TotalMicroloans2016"),
+                                      c("Number_Microloans2017","Number_Microloans2017"),
+                                      c("Loanloss2017","Loanloss2016"),
+                                      c("write_off_ratio17","write_off_ratio16"),
+                                      c("PAR30_17","PAR30_16")))
+
+data_reshaped$GDP_17<-data_reshaped$GDP_17
+liv<-levels(data_reshaped$TypeofInstitution)
+rowBanks<-which(data_reshaped$TypeofInstitution==liv[1])
+rowCredit<-which(data_reshaped$TypeofInstitution==liv[2])
+rowGov<-which(data_reshaped$TypeofInstitution==liv[3])
+rowNGO<-which(data_reshaped$TypeofInstitution==liv[4])
+rowNonBank<-which(data_reshaped$TypeofInstitution==liv[5])
+rowState<-which(data_reshaped$TypeofInstitution==liv[6])
+
+#Variabile dei costi totali
+TC<-log(data_reshaped$FinancialExpenses2017+data_reshaped$Operatingexpense2017)-log(data_reshaped$Activeborrowers2017)
+
+#variabili del modello
+labor<-log(data_reshaped$Staffproductivity2017) #produttività dello staff=ci si aspetta un coefficiente negativo
+capital<-log(data_reshaped$FinancialExpenses2017/abs(data_reshaped$total_liabilites17))#spese di interessi per le passività detenute= ci si aspetta un coefficiente positivo
+loans<-log(data_reshaped$AVG_loan_portfolio17) #gross loan portfolio medio = più prestiti da gestire => maggiori costi - ci si aspetta un coefficiente positivo
+eq<-log(data_reshaped$total_equity17/data_reshaped$total_assets17) #equity to asssets ratio = mostra quanto una banca adotta strategie rischiose = coefficiente positivo => più la strategia adottata è rischiosa maggiore diventano i costi
+
+newdata<-data.frame(data_reshaped,TC,labor,capital,loans,eq)
+cor(newdata[,c("TC","labor","capital","loans","eq","GDP_17")])
+```
+
+Per prima cosa si esegue una regressione sull'offerta o meno di servizi non finanziari
+```{r}
+#============ NO SERVICES OFFERED========================
+formula<-as.formula(TC~labor+capital+loans+eq+Size_mfi+GDP_17+Noservices_offered)
+
+model_pooled<-plm(formula,index=c("id","Year"),effect="individual",model="pooling", data=newdata)
+summary(model_pooled)
+model_between<-plm(formula,index=c("id","Year"),effect="individual",model="between", data=newdata)
+summary(model_between)
+model_random<-plm(formula,index=c("id","Year"),effect="individual",model="random", data=newdata)
+summary(model_random)
+```
+Il modello pooling mostra una certa significatività del coefficiente associato alla dummy
+dell'assenza di servizi non finanziari: in tutti i casi è comunque positivo. Ciò significa che
+in loro assenza i costi per borrower sono maggiori
+
+Si passa poi a studiare nello specifico le tre categorie di servizi offerti.
+```{r}
+formula<-as.formula(TC~labor+capital+loans+eq+Size_mfi+GDP_17+Business_developments+Client_development+Entrepreneurship_development)
+
+model_pooled<-plm(formula,index=c("id","Year"),effect="individual",model="pooling", data=newdata)
+summary(model_pooled)
+model_between<-plm(formula,index=c("id","Year"),effect="individual",model="between", data=newdata)
+summary(model_between)
+model_random<-plm(formula,index=c("id","Year"),effect="individual",model="random", data=newdata)
+summary(model_random)
+```
+In generale senza distinguere il tipo di istituzione non si trova alcun risultato significativo
+
+CREDIT UNION
+```{r}
+model_pooled<-plm(formula,index=c("id","Year"),effect="individual",model="pooling", data=newdata[rowCredit,])
+summary(model_pooled)
+model_random<-plm(formula,index=c("id","Year"),effect="individual",model="random", data=newdata[rowCredit,])
+summary(model_random)
+model_between<-plm(formula,index=c("id","Year"),effect="individual",model="between", data=newdata[rowCredit,])
+summary(model_between)
+```
+Risultati significativi per tutte le regressioni.
+
+NGO
+```{r}
+model_pooled<-plm(formula,index=c("id","Year"),effect="individual",model="pooling", data=newdata[rowNGO,])
+summary(model_pooled)
+model_random<-plm(formula,index=c("id","Year"),effect="individual",model="random", data=newdata[rowNGO,])
+summary(model_random)
+model_between<-plm(formula,index=c("id","Year"),effect="individual",model="between", data=newdata[rowNGO,])
+summary(model_between)
+```
+Per le NGO la presenza o meno di servizi non finanziari non sembra avere un effetto significativo
+sui costi. Data la natura delle NGO verrebbe però da chiedersi se forse un modello dei costi
+generico come quello preso in considerazione sia adatto. Una NGO potrbbe avere costi di natura diversa 
+rispetto ad una banca o ad un'istituzione finanziaria
+
+
+NONBANK INSTITUTION
+```{r}
+model_pooled<-plm(formula,index=c("id","Year"),effect="individual",model="pooling", data=newdata[rowNonBank,])
+summary(model_pooled)
+model_random<-plm(formula,index=c("id","Year"),effect="individual",model="random", data=newdata[rowNonBank,])
+summary(model_random)
+model_between<-plm(formula,index=c("id","Year"),effect="individual",model="between", data=newdata[rowNonBank,])
+summary(model_between)
+```
+Servizi Entrepreunership significativi e coefficiente positivo => incidenza positiva sui costi
+
+
+DOMANDA 3.	Is there any effect of the non-financial service provision 
+on loan conditions (amount, interest rate, etc.)? Check this according to the type of institution.
+
+Costruzione della variabile "Microloan medio"
+```{r}
+avg_microloan<-data_reshaped$TotalMicroloans2017/data_reshaped$Activeborrowers2017
+data_reshaped<-cbind(data_reshaped,avg_microloan)
+loan_var<-c("Average_businessterm","Average_personalterm","Average_interestrate_business","Average_interestrate_person","avg_microloan")
+
+noservice<-which(data$Noservices_offered==1)
+x<-cbind(table(data$TypeofInstitution[noservice]),table(data$TypeofInstitution[-noservice]))
+colnames(x)<-c("Assenza di NFS","Presenza di NFS");x
+```
+
+
+```{r}
+#Bank
+loan_rif<-c("BusinessMicroloans", "Microloans","BusinessMicroloans", "Microloans")
+for (j in 1:4) {
+  notoffer<-which(data[,"Noservices_offered"]==1& data[,loan_rif[j]]==1 &data$TypeofInstitution=="Commercial Bank")
+  offer<-which(data[,"Noservices_offered"]==0 & data[,loan_rif[j]]==1 & data$TypeofInstitution=="Commercial Bank")
+  x<-(rbind(summary(data[notoffer,loan_var[j]]),
+            summary(data[offer,loan_var[j]])))
+  x<-cbind(x, c(length(notoffer),length(offer)))
+  rownames(x)<-c("Bank senza nfs", "Bank con nfs")
+  colnames(x)[7]<-"Osservazioni"
+  print(loan_var[j])
+  print(x)
+  y<-as.matrix(c(t.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value,ks.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value))
+  colnames(y)<-"Pvalue"
+  rownames(y)<-c("Test t", "KS test")
+  print(y)
+}
+ #per average microloan
+j=5
+notoffer<-which(data_reshaped[,"Noservices_offered"]==1& data_reshaped$TypeofInstitution=="Commercial Bank")
+offer<-which(data_reshaped[,"Noservices_offered"]==0 & data_reshaped$TypeofInstitution=="Commercial Bank")
+x<-(rbind(summary(data_reshaped[notoffer,loan_var[j]]),
+          summary(data_reshaped[offer,loan_var[j]])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("Bank senza nfs", "Bank con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(loan_var[j])
+print(x)
+y<-as.matrix(c(t.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value,ks.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+
+
+#CREDIT UNION
+loan_rif<-c("BusinessMicroloans", "Microloans","BusinessMicroloans", "Microloans")
+for (j in 1:4) {
+  notoffer<-which(data[,"Noservices_offered"]==1& data[,loan_rif[j]]==1 &data$TypeofInstitution=="Credit Union / Financial Cooperative (**)")
+  offer<-which(data[,"Noservices_offered"]==0 & data[,loan_rif[j]]==1 & data$TypeofInstitution=="Credit Union / Financial Cooperative (**)")
+  x<-(rbind(summary(data[notoffer,loan_var[j]]),
+            summary(data[offer,loan_var[j]])))
+  x<-cbind(x, c(length(notoffer),length(offer)))
+  rownames(x)<-c("Credit senza nfs", "Credit con nfs")
+  colnames(x)[7]<-"Osservazioni"
+  print(loan_var[j])
+  print(x)
+  y<-as.matrix(c(t.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value,ks.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value))
+  colnames(y)<-"Pvalue"
+  rownames(y)<-c("Test t", "KS test")
+  print(y)
+}
+ #per average microloan
+j=5
+notoffer<-which(data_reshaped[,"Noservices_offered"]==1& data_reshaped$TypeofInstitution=="Credit Union / Financial Cooperative (**)")
+offer<-which(data_reshaped[,"Noservices_offered"]==0 & data_reshaped$TypeofInstitution=="Credit Union / Financial Cooperative (**)")
+x<-(rbind(summary(data_reshaped[notoffer,loan_var[j]]),
+          summary(data_reshaped[offer,loan_var[j]])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("Credit senza nfs", "Credit con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(loan_var[j])
+print(x)
+y<-as.matrix(c(t.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value,ks.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+
+#NGO
+loan_rif<-c("BusinessMicroloans", "Microloans","BusinessMicroloans", "Microloans")
+for (j in 1:4) {
+  notoffer<-which(data[,"Noservices_offered"]==1& data[,loan_rif[j]]==1 &data$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)")
+  offer<-which(data[,"Noservices_offered"]==0 & data[,loan_rif[j]]==1 & data$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)")
+  x<-(rbind(summary(data[notoffer,loan_var[j]]),
+            summary(data[offer,loan_var[j]])))
+  x<-cbind(x, c(length(notoffer),length(offer)))
+  rownames(x)<-c("NGO senza nfs", "NGO con nfs")
+  colnames(x)[7]<-"Osservazioni"
+  print(loan_var[j])
+  print(x)
+  y<-as.matrix(c(t.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value,ks.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value))
+  colnames(y)<-"Pvalue"
+  rownames(y)<-c("Test t", "KS test")
+  print(y)
+}
+ #per average microloan
+j=5
+notoffer<-which(data_reshaped[,"Noservices_offered"]==1& data_reshaped$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)")
+offer<-which(data_reshaped[,"Noservices_offered"]==0 & data_reshaped$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)")
+x<-(rbind(summary(data_reshaped[notoffer,loan_var[j]]),
+          summary(data_reshaped[offer,loan_var[j]])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("NGO senza nfs", "NGO con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(loan_var[j])
+print(x)
+y<-as.matrix(c(t.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value,ks.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+
+
+#NON bank
+for (j in 1:4) {
+  notoffer<-which(data[,"Noservices_offered"]==1& data[,loan_rif[j]]==1 & data$TypeofInstitution=="Non-Bank Financial Institution (*)")
+  offer<-which(data[,"Noservices_offered"]==0& data[,loan_rif[j]]==1  & data$TypeofInstitution=="Non-Bank Financial Institution (*)")
+  x<-(rbind(summary(data[notoffer,loan_var[j]]),
+            summary(data[offer,loan_var[j]])))
+  x<-cbind(x, c(length(notoffer),length(offer)))
+  rownames(x)<-c("NON-bank senza nfs", "NON-bank con nfs")
+  colnames(x)[7]<-"Osservazioni"
+  print(loan_var[j])
+  print(x)
+  y<-as.matrix(c(t.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value,ks.test(data[offer,loan_var[j]],data[notoffer,loan_var[j]])$p.value))
+  colnames(y)<-"Pvalue"
+  rownames(y)<-c("Test t", "KS test")
+  print(y)
+}
+ #per average microloan
+j=5
+notoffer<-which(data_reshaped[,"Noservices_offered"]==1 & data_reshaped$TypeofInstitution=="Non-Bank Financial Institution (*)")
+offer<-which(data_reshaped[,"Noservices_offered"]==0& data_reshaped$TypeofInstitution=="Non-Bank Financial Institution (*)")
+x<-(rbind(summary(data_reshaped[notoffer,loan_var[j]]),
+          summary(data_reshaped[offer,loan_var[j]])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("NON-bank senza nfs", "NON-bank con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(loan_var[j])
+print(x)
+y<-as.matrix(c(t.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value,ks.test(data_reshaped[offer,loan_var[j]],data_reshaped[notoffer,loan_var[j]])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+
+```
+
+
+#DOMANDA 4.	Is there any effect of the non-financial service provision 
+#on loan losses / default rates / portfolio at risk? 
+
+variabili di interesse: LOAN LOSSES, PAR30 e write off ratio
+Dato che non si vuole studiare l'effetto sulle singole tipologie di 
+istituzioni si utilizzaranno i dati originari dichiarati, dato che sono già un numero
+sufficiente per effettuare delle analisi.
+
+#LOAN LOSSES
+```{r}
+#variabili di interesse: LOAN LOSSES
+indici_bilancio$Loanloss2017<-abs(indici_bilancio$Loanloss2017) #un'istituzione ha inserito un valore negativo: confrontando con il write off ratio si capisce che è un'errore di compilazione
+indici_bilancio[,"Loanloss2017"]<-indici_bilancio[,"Loanloss2017"]/data$Activeborrowers2017
+```
+ora si può passare allo  studio riguardo ai NFS: non bisogna distinguere tra tipi di istituzioni
+quindi prendo semplicemente le istituzioni che offrono almeno 1 NFS e confronto le perdite ottenute 
+con quelle che non offrono NFS: per ottenere un confronto più appropriato cosidero 
+soltanto le istituzioni che dichiarano delle perdite
+```{r}
+notoffer<-which(data[,"Noservices_offered"]==1 & indici_bilancio$Loanloss2017!=0)
+offer<-which(data[,"Noservices_offered"]==0&indici_bilancio$Loanloss2017!=0) 
+x<-(rbind(summary(indici_bilancio[notoffer,"Loanloss2017"]),
+          summary(indici_bilancio[offer,"Loanloss2017"])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("MFI senza nfs", "MFI con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(x)
+y<-as.matrix(c(t.test(indici_bilancio[offer,"Loanloss2017"],indici_bilancio[notoffer,"Loanloss2017"])$p.value,ks.test(indici_bilancio[offer,"Loanloss2017"],indici_bilancio[notoffer,"Loanloss2017"])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+```
+
+
+#PORTFOLIO AT RISK
+```{r}
+notoffer<-which(data[,"Noservices_offered"]==1 & indici_bilancio$PAR30_17!=0)
+offer<-which(data[,"Noservices_offered"]==0 & indici_bilancio$PAR30_17!=0) 
+x<-(rbind(summary(indici_bilancio[notoffer,"PAR30_17"]),
+          summary(indici_bilancio[offer,"PAR30_17"])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("MFI senza nfs", "MFI con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(x)
+y<-as.matrix(c(t.test(indici_bilancio[offer,"PAR30_17"],indici_bilancio[notoffer,"PAR30_17"])$p.value,ks.test(indici_bilancio[offer,"PAR30_17"],indici_bilancio[notoffer,"PAR30_17"])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+```
+
+
+chi offre NFS ha un PAR30 significativamente superiore a chi non offre NFS: questo si può 
+interpretare come il fatto che quando vengono offerti NFS l'MFI è più disponibile 
+ad avere un PAR30 elevato: quindi l'MFI è più disponibile a farsi carico di rischi
+maggiori,  dato che questo indice misura la rischiosità del portafoglio detenuto
+andrebbe condotta un'analisi più approfondita per capire se quando questi servizi
+sono effettivamente utilizzati si ha lo stesso risultato.
+
+##DEFAULT RATES - write off ratio 
+```{r}
+#confronto
+notoffer<-which(data[,"Noservices_offered"]==1 & indici_bilancio$write_off_ratio17!=0)
+offer<-which(data[,"Noservices_offered"]==0 & indici_bilancio$write_off_ratio17!=0) 
+x<-(rbind(summary(indici_bilancio[notoffer,"write_off_ratio17"]),
+          summary(indici_bilancio[offer,"write_off_ratio17"])))
+x<-cbind(x, c(length(notoffer),length(offer)))
+rownames(x)<-c("MFI senza nfs", "MFI con nfs")
+colnames(x)[7]<-"Osservazioni"
+print(x)
+y<-as.matrix(c(t.test(indici_bilancio[offer,"write_off_ratio17"],indici_bilancio[notoffer,"write_off_ratio17"])$p.value,ks.test(indici_bilancio[offer,"write_off_ratio17"],indici_bilancio[notoffer,"write_off_ratio17"])$p.value))
+colnames(y)<-"Pvalue"
+rownames(y)<-c("Test t", "KS test")
+print(y)
+```
+
+
+DOMANDA 5.	Do subsidies help the provision of non-financial services?
+```{r}
+sussidi<-which(data$Grants!=0 & data$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)")
+nosussidi<-which(data$Grants==0 & data$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)")
+g<-rbind(table(data[sussidi, "Noservices_offered"]),
+      table(data[nosussidi, "Noservices_offered"]))
+dimnames(g)<-list(c("Con sussidi", "Senza sussidi"), Presenza_NFS=c("Sì", "No"))
+g
+fisher.test(g)
+prop.test(g)
+```
+
+La scelta se fornire almeno 1 NFS non dipende dai sussidi
+
+```{r}
+g<-rbind(table(data[sussidi, "CostofNotFinProd"]),
+      table(data[nosussidi, "CostofNotFinProd"]))
+dimnames(g)<- list(c("Con sussidi", "Senza sussidi"),c("Gratuiti", "Dietro pagamento"))
+g
+fisher.test(g)
+prop.test(g)
+```
+
+nemmeno nella scelta se fare pagare o meno il NFS sembrano avere un legame con la presenza di sussidi
+
+```{r}
+g<-rbind(table(data[sussidi, "Num_notfin_services"]),
+      table(data[nosussidi, "Num_notfin_services"]))
+rownames(g)<- c("Con sussidi", "Senza sussidi")
+g
+chisq.test(g)
+kruskal.test(g[1,],g[2,])
+```
+
+```{r}
+sus<-(data[which(data$Grants!=0&data$Number_receivers_of_NotFinProd2017!=0& data$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)"), "Number_receivers_of_NotFinProd2017"])
+nosus<-(data[which(data$Grants==0&data$Number_receivers_of_NotFinProd2017!=0& data$TypeofInstitution=="NGO (***) (Association, Foundation, Religious institution etc.)"), "Number_receivers_of_NotFinProd2017"])
+summary(sus); summary(nosus)
+ks.test(sus,nosus)
+```
